@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import Stripe from 'stripe';
-import { kv } from '@vercel/kv';
 import Anthropic from '@anthropic-ai/sdk';
 
 const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -32,17 +31,30 @@ export async function POST(request) {
     return NextResponse.json({ error: 'Payment not completed.' }, { status: 402 });
   }
 
-  // 2. Atomic check: mark session as used (prevents replay attacks / double-use)
-  const kvKey = `session:${sessionId}`;
-  const wasSet = await kv.set(kvKey, 'used', { ex: 86400, nx: true }); // nx = only if not exists
-  if (wasSet === null) {
+  // 2. Check if already used — stored in the PaymentIntent's metadata (no DB needed)
+  const piId = typeof session.payment_intent === 'string'
+    ? session.payment_intent
+    : session.payment_intent?.id;
+
+  if (!piId) {
+    return NextResponse.json({ error: 'Could not locate payment record.' }, { status: 400 });
+  }
+
+  const pi = await stripe.paymentIntents.retrieve(piId);
+
+  if (pi.metadata?.chartai_used === 'true') {
     return NextResponse.json(
-      { error: 'This payment session has already been used.' },
+      { error: 'This payment has already been used for an analysis.' },
       { status: 409 }
     );
   }
 
-  // 3. Analyze with Claude
+  // 3. Mark as used on Stripe before calling Claude
+  await stripe.paymentIntents.update(piId, {
+    metadata: { chartai_used: 'true' },
+  });
+
+  // 4. Analyze with Claude
   try {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
@@ -80,23 +92,23 @@ Return ONLY a valid JSON object — no markdown, no extra text:
 
     const text = response.content.find((b) => b.type === 'text')?.text || '';
     const match = text.match(/\{[\s\S]*\}/);
+
     if (!match) {
-      // Claude failed to return JSON — release the session lock so user can retry
-      await kv.del(kvKey);
+      // Undo the used flag so the user can retry
+      await stripe.paymentIntents.update(piId, { metadata: { chartai_used: 'false' } });
       return NextResponse.json(
-        { error: 'Analysis failed to parse. Please try again (your payment is still valid).' },
+        { error: 'Analysis failed to parse. Please try again — your payment is still valid.' },
         { status: 500 }
       );
     }
 
-    const analysis = JSON.parse(match[0]);
-    return NextResponse.json({ analysis });
+    return NextResponse.json({ analysis: JSON.parse(match[0]) });
   } catch (err) {
-    // Claude/API error — release the session lock so user can retry
-    await kv.del(kvKey);
+    // Undo the used flag so the user can retry
+    await stripe.paymentIntents.update(piId, { metadata: { chartai_used: 'false' } });
     console.error('Claude error:', err);
     return NextResponse.json(
-      { error: 'Analysis failed. Please try again (your payment is still valid).' },
+      { error: 'Analysis failed. Please try again — your payment is still valid.' },
       { status: 500 }
     );
   }
