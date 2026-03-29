@@ -3,6 +3,19 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const PRICE = process.env.NEXT_PUBLIC_PRICE_DISPLAY || '$0.99';
+const FREE_LIMIT = 5;
+const LS_KEY = 'chartai_free_uses';
+
+function getFreeUsesLeft() {
+  if (typeof window === 'undefined') return FREE_LIMIT;
+  const used = parseInt(localStorage.getItem(LS_KEY) || '0', 10);
+  return Math.max(0, FREE_LIMIT - used);
+}
+
+function incrementFreeUses() {
+  const used = parseInt(localStorage.getItem(LS_KEY) || '0', 10);
+  localStorage.setItem(LS_KEY, String(used + 1));
+}
 
 export default function Home() {
   const [imageB64, setImageB64]   = useState(null);
@@ -14,7 +27,13 @@ export default function Home() {
   const [error, setError]         = useState(null);
   const [dragging, setDragging]   = useState(false);
   const [returnMsg, setReturnMsg] = useState(null);
+  const [freeLeft, setFreeLeft]   = useState(FREE_LIMIT);
   const fileInputRef = useRef(null);
+
+  // Read free uses from localStorage on mount
+  useEffect(() => {
+    setFreeLeft(getFreeUsesLeft());
+  }, []);
 
   // Detect return from PayPal and auto-analyze
   useEffect(() => {
@@ -57,6 +76,12 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error || 'Analysis failed');
       setAnalysis(data.analysis);
       setReturnMsg(null);
+
+      // Deduct free use only on success
+      if (orderId === 'free') {
+        incrementFreeUses();
+        setFreeLeft(getFreeUsesLeft());
+      }
     } catch (err) {
       setError(err.message);
       setReturnMsg(null);
@@ -88,12 +113,16 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
+  async function handleFreeAnalyze() {
+    if (!imageB64 || !mediaType) return;
+    await runAnalysis('free', imageB64, mediaType);
+  }
+
   async function handlePay() {
     if (!imageB64 || !mediaType) return;
     setPaying(true);
     setError(null);
     try {
-      // Save image to sessionStorage before leaving the page
       sessionStorage.setItem('chartai_image', imageB64);
       sessionStorage.setItem('chartai_media_type', mediaType);
 
@@ -110,6 +139,7 @@ export default function Home() {
   }
 
   const isUp = analysis?.direction === 'UP';
+  const isBusy = paying || analyzing;
 
   return (
     <div style={s.app}>
@@ -186,32 +216,77 @@ export default function Home() {
               </div>
             )}
 
-            {/* Pay button */}
-            <button
-              style={{
-                ...s.payBtn,
-                ...((!imageB64 || paying || analyzing) ? s.payBtnDisabled : {}),
-              }}
-              onClick={handlePay}
-              disabled={!imageB64 || paying || analyzing}
-            >
-              {paying ? (
-                <><span style={s.spin} /> Redirecting to payment…</>
-              ) : (
-                <>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="1" y="4" width="22" height="16" rx="2" ry="2"/>
-                    <line x1="1" y1="10" x2="23" y2="10"/>
-                  </svg>
-                  Pay {PRICE} &amp; Analyze Chart
-                </>
-              )}
-            </button>
+            {/* Free uses badge */}
+            <div style={s.freeBar}>
+              <span style={s.freeLabel}>
+                {freeLeft > 0
+                  ? `${freeLeft} free ${freeLeft === 1 ? 'analysis' : 'analyses'} remaining`
+                  : 'Free uses exhausted — pay per analysis'}
+              </span>
+              <div style={s.freeDots}>
+                {Array.from({ length: FREE_LIMIT }).map((_, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      ...s.freeDot,
+                      ...(i < freeLeft ? s.freeDotActive : s.freeDotUsed),
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Action button */}
+            {freeLeft > 0 ? (
+              <button
+                style={{
+                  ...s.payBtn,
+                  ...s.freeBtn,
+                  ...(!imageB64 || isBusy ? s.payBtnDisabled : {}),
+                }}
+                onClick={handleFreeAnalyze}
+                disabled={!imageB64 || isBusy}
+              >
+                {analyzing ? (
+                  <><span style={s.spin} /> Analyzing…</>
+                ) : (
+                  <>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                    </svg>
+                    Analyze Free ({freeLeft} left)
+                  </>
+                )}
+              </button>
+            ) : (
+              <button
+                style={{
+                  ...s.payBtn,
+                  ...(!imageB64 || isBusy ? s.payBtnDisabled : {}),
+                }}
+                onClick={handlePay}
+                disabled={!imageB64 || isBusy}
+              >
+                {paying ? (
+                  <><span style={s.spin} /> Redirecting to payment…</>
+                ) : (
+                  <>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="1" y="4" width="22" height="16" rx="2" ry="2"/>
+                      <line x1="1" y1="10" x2="23" y2="10"/>
+                    </svg>
+                    Pay {PRICE} &amp; Analyze Chart
+                  </>
+                )}
+              </button>
+            )}
 
             <p style={s.hint}>
-              {imageB64
-                ? `One-time payment · Secure checkout via Stripe`
-                : 'Upload a crypto chart screenshot to get started'}
+              {freeLeft > 0
+                ? 'No payment needed for your free analyses'
+                : imageB64
+                  ? `One-time payment · Secure checkout via PayPal`
+                  : 'Upload a crypto chart screenshot to get started'}
             </p>
           </div>
 
@@ -311,7 +386,9 @@ export default function Home() {
                   No analysis yet
                 </p>
                 <p style={{ fontSize: 13, color: 'var(--muted)', opacity: .6, maxWidth: 220, lineHeight: 1.5, textAlign: 'center' }}>
-                  Upload a chart and pay {PRICE} to get your AI-powered prediction
+                  {freeLeft > 0
+                    ? `You have ${freeLeft} free ${freeLeft === 1 ? 'analysis' : 'analyses'} — upload a chart to start`
+                    : `Upload a chart and pay ${PRICE} to get your AI-powered prediction`}
                 </p>
               </div>
             )}
@@ -322,14 +399,14 @@ export default function Home() {
 
       <footer style={s.footer}>
         <p style={{ fontSize: 12, color: 'var(--muted)', opacity: .45 }}>
-          Payments processed securely by Stripe · Powered by Claude AI · Not financial advice
+          Powered by Claude AI · Not financial advice
         </p>
       </footer>
     </div>
   );
 }
 
-// ── Styles (inline to avoid CSS modules complexity) ──────────
+// ── Styles ──────────────────────────────────────────────────────
 const s = {
   app:       { minHeight: '100vh', display: 'flex', flexDirection: 'column' },
   header:    { background: 'var(--surface)', borderBottom: '1px solid var(--border)', padding: '0 24px' },
@@ -351,7 +428,14 @@ const s = {
   preview:   { width: '100%', maxHeight: 340, objectFit: 'contain', display: 'block' },
   removeBtn: { position: 'absolute', top: 10, right: 10, background: 'rgba(10,10,20,.85)', border: '1px solid var(--border)', color: 'var(--text)', padding: '5px 11px', borderRadius: 6, fontSize: 12, cursor: 'pointer', backdropFilter: 'blur(4px)' },
   errorBox:  { background: 'rgba(255,77,106,.08)', border: '1px solid rgba(255,77,106,.3)', color: '#ff6b84', borderRadius: 'var(--r-sm)', padding: '10px 14px', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 },
+  freeBar:   { display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: '10px 14px', marginBottom: 12 },
+  freeLabel: { fontSize: 12, color: 'var(--muted)', fontWeight: 500 },
+  freeDots:  { display: 'flex', gap: 5 },
+  freeDot:   { width: 10, height: 10, borderRadius: '50%' },
+  freeDotActive: { background: 'var(--up)', boxShadow: '0 0 6px var(--up-glow)' },
+  freeDotUsed:   { background: 'var(--border-2)' },
   payBtn:    { width: '100%', padding: '15px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 'var(--r-sm)', fontSize: 16, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9, letterSpacing: '.2px' },
+  freeBtn:   { background: '#10d988' },
   payBtnDisabled: { opacity: .38, cursor: 'not-allowed' },
   hint:      { textAlign: 'center', fontSize: 12, color: 'var(--muted)', marginTop: 14, opacity: .65 },
   spin:      { width: 16, height: 16, border: '2px solid rgba(255,255,255,.2)', borderTopColor: 'currentColor', borderRadius: '50%', animation: 'spin .75s linear infinite', flexShrink: 0, display: 'inline-block' },

@@ -40,38 +40,38 @@ export async function POST(request) {
     return NextResponse.json({ error: 'Missing required fields.' }, { status: 400 });
   }
 
-  // 1. Capture the PayPal payment
-  // Capturing is atomic — PayPal rejects double-captures automatically, no DB needed
-  let captureData;
-  try {
-    const accessToken = await getAccessToken();
-    const res = await fetch(`${paypalBase()}/v2/checkout/orders/${orderId}/capture`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-    });
-    captureData = await res.json();
-  } catch (err) {
-    console.error('PayPal capture error:', err);
-    return NextResponse.json({ error: 'Payment verification failed. Please try again.' }, { status: 500 });
-  }
+  // 1. Verify / capture payment (skip if free use)
+  if (orderId !== 'free') {
+    let captureData;
+    try {
+      const accessToken = await getAccessToken();
+      const res = await fetch(`${paypalBase()}/v2/checkout/orders/${orderId}/capture`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      captureData = await res.json();
+    } catch (err) {
+      console.error('PayPal capture error:', err);
+      return NextResponse.json({ error: 'Payment verification failed. Please try again.' }, { status: 500 });
+    }
 
-  // Already captured = already used
-  if (captureData.details?.[0]?.issue === 'ORDER_ALREADY_CAPTURED') {
-    return NextResponse.json(
-      { error: 'This payment has already been used for an analysis.' },
-      { status: 409 }
-    );
-  }
+    if (captureData.details?.[0]?.issue === 'ORDER_ALREADY_CAPTURED') {
+      return NextResponse.json(
+        { error: 'This payment has already been used for an analysis.' },
+        { status: 409 }
+      );
+    }
 
-  if (captureData.status !== 'COMPLETED') {
-    console.error('PayPal capture status:', captureData);
-    return NextResponse.json(
-      { error: 'Payment not confirmed. Please try again.' },
-      { status: 402 }
-    );
+    if (captureData.status !== 'COMPLETED') {
+      console.error('PayPal capture status:', captureData);
+      return NextResponse.json(
+        { error: 'Payment not confirmed. Please try again.' },
+        { status: 402 }
+      );
+    }
   }
 
   // 2. Analyze with Claude (or return mock data if no API key set)
