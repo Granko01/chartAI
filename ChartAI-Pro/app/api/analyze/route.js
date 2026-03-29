@@ -74,7 +74,22 @@ export async function POST(request) {
     );
   }
 
-  // 2. Analyze with Claude
+  // 2. Analyze with Claude (or return mock data if no API key set)
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json({
+      analysis: {
+        direction: 'UP',
+        confidence: 72,
+        trend: 'Bullish uptrend with increasing momentum',
+        patterns: ['Ascending Triangle', 'Golden Cross'],
+        support: '$42,000',
+        resistance: '$48,500',
+        reasoning: 'TEST MODE — Anthropic API key not set. The chart shows a clear ascending triangle pattern with higher lows forming over the past week. Volume is increasing on up-moves suggesting accumulation. A breakout above resistance could trigger a significant rally.',
+        timeframe: 'Next 24-48 hours',
+      },
+    });
+  }
+
   try {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
