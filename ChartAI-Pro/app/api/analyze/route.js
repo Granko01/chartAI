@@ -2,10 +2,9 @@ import { NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import Anthropic from '@anthropic-ai/sdk';
 
-const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY);
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 export async function POST(request) {
+  const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY);
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   let body;
   try {
     body = await request.json();
