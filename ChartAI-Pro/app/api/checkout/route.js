@@ -24,9 +24,22 @@ async function getAccessToken() {
 }
 
 export async function POST() {
+  // Check env vars are present
+  if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
+    return NextResponse.json({ error: 'PayPal credentials not configured.' }, { status: 500 });
+  }
+  if (!process.env.NEXT_PUBLIC_APP_URL) {
+    return NextResponse.json({ error: 'App URL not configured.' }, { status: 500 });
+  }
+
   try {
     const accessToken = await getAccessToken();
+    if (!accessToken) {
+      return NextResponse.json({ error: 'PayPal auth failed — check Client ID and Secret.' }, { status: 500 });
+    }
+
     const amount = (parseInt(process.env.PRICE_CENTS || '99') / 100).toFixed(2);
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, ''); // strip trailing slash
 
     const res = await fetch(`${paypalBase()}/v2/checkout/orders`, {
       method: 'POST',
@@ -45,8 +58,8 @@ export async function POST() {
         application_context: {
           brand_name: 'ChartAI',
           user_action: 'PAY_NOW',
-          return_url: `${process.env.NEXT_PUBLIC_APP_URL}/`,
-          cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/`,
+          return_url: `${appUrl}/`,
+          cancel_url: `${appUrl}/`,
         },
       }),
     });
@@ -55,15 +68,16 @@ export async function POST() {
     const approveUrl = order.links?.find((l) => l.rel === 'approve')?.href;
 
     if (!approveUrl) {
-      console.error('PayPal order response:', order);
-      throw new Error('No approval URL in PayPal response');
+      console.error('PayPal order response:', JSON.stringify(order));
+      const detail = order.details?.[0]?.description || order.message || 'No approval URL returned';
+      return NextResponse.json({ error: `PayPal error: ${detail}` }, { status: 500 });
     }
 
     return NextResponse.json({ url: approveUrl });
   } catch (err) {
     console.error('PayPal checkout error:', err);
     return NextResponse.json(
-      { error: 'Could not start checkout. Please try again.' },
+      { error: err.message || 'Could not start checkout. Please try again.' },
       { status: 500 }
     );
   }
