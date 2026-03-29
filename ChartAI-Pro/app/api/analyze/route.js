@@ -1,10 +1,32 @@
 import { NextResponse } from 'next/server';
-import Stripe from 'stripe';
 import Anthropic from '@anthropic-ai/sdk';
 
+function paypalBase() {
+  return process.env.PAYPAL_ENV === 'live'
+    ? 'https://api-m.paypal.com'
+    : 'https://api-m.sandbox.paypal.com';
+}
+
+async function getAccessToken() {
+  const credentials = Buffer.from(
+    `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
+  ).toString('base64');
+
+  const res = await fetch(`${paypalBase()}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+  const data = await res.json();
+  return data.access_token;
+}
+
 export async function POST(request) {
-  const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY);
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
   let body;
   try {
     body = await request.json();
@@ -12,48 +34,47 @@ export async function POST(request) {
     return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 });
   }
 
-  const { sessionId, image, mediaType } = body;
+  const { orderId, image, mediaType } = body;
 
-  if (!sessionId || !image || !mediaType) {
+  if (!orderId || !image || !mediaType) {
     return NextResponse.json({ error: 'Missing required fields.' }, { status: 400 });
   }
 
-  // 1. Verify Stripe payment
-  let session;
+  // 1. Capture the PayPal payment
+  // Capturing is atomic — PayPal rejects double-captures automatically, no DB needed
+  let captureData;
   try {
-    session = await stripe.checkout.sessions.retrieve(sessionId);
-  } catch {
-    return NextResponse.json({ error: 'Invalid payment session.' }, { status: 400 });
+    const accessToken = await getAccessToken();
+    const res = await fetch(`${paypalBase()}/v2/checkout/orders/${orderId}/capture`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    captureData = await res.json();
+  } catch (err) {
+    console.error('PayPal capture error:', err);
+    return NextResponse.json({ error: 'Payment verification failed. Please try again.' }, { status: 500 });
   }
 
-  if (session.payment_status !== 'paid') {
-    return NextResponse.json({ error: 'Payment not completed.' }, { status: 402 });
-  }
-
-  // 2. Check if already used — stored in the PaymentIntent's metadata (no DB needed)
-  const piId = typeof session.payment_intent === 'string'
-    ? session.payment_intent
-    : session.payment_intent?.id;
-
-  if (!piId) {
-    return NextResponse.json({ error: 'Could not locate payment record.' }, { status: 400 });
-  }
-
-  const pi = await stripe.paymentIntents.retrieve(piId);
-
-  if (pi.metadata?.chartai_used === 'true') {
+  // Already captured = already used
+  if (captureData.details?.[0]?.issue === 'ORDER_ALREADY_CAPTURED') {
     return NextResponse.json(
       { error: 'This payment has already been used for an analysis.' },
       { status: 409 }
     );
   }
 
-  // 3. Mark as used on Stripe before calling Claude
-  await stripe.paymentIntents.update(piId, {
-    metadata: { chartai_used: 'true' },
-  });
+  if (captureData.status !== 'COMPLETED') {
+    console.error('PayPal capture status:', captureData);
+    return NextResponse.json(
+      { error: 'Payment not confirmed. Please try again.' },
+      { status: 402 }
+    );
+  }
 
-  // 4. Analyze with Claude
+  // 2. Analyze with Claude
   try {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
@@ -93,21 +114,19 @@ Return ONLY a valid JSON object — no markdown, no extra text:
     const match = text.match(/\{[\s\S]*\}/);
 
     if (!match) {
-      // Undo the used flag so the user can retry
-      await stripe.paymentIntents.update(piId, { metadata: { chartai_used: 'false' } });
+      // Payment was captured but Claude failed — log the capture ID for manual refund
+      console.error('Claude parse failed. PayPal capture ID:', captureData.purchase_units?.[0]?.payments?.captures?.[0]?.id);
       return NextResponse.json(
-        { error: 'Analysis failed to parse. Please try again — your payment is still valid.' },
+        { error: 'Analysis failed after payment. Contact support with this ID: ' + (captureData.id || orderId) },
         { status: 500 }
       );
     }
 
     return NextResponse.json({ analysis: JSON.parse(match[0]) });
   } catch (err) {
-    // Undo the used flag so the user can retry
-    await stripe.paymentIntents.update(piId, { metadata: { chartai_used: 'false' } });
-    console.error('Claude error:', err);
+    console.error('Claude error. PayPal order:', orderId, err);
     return NextResponse.json(
-      { error: 'Analysis failed. Please try again — your payment is still valid.' },
+      { error: 'Analysis failed after payment. Contact support with this ID: ' + orderId },
       { status: 500 }
     );
   }

@@ -16,11 +16,11 @@ export default function Home() {
   const [returnMsg, setReturnMsg] = useState(null);
   const fileInputRef = useRef(null);
 
-  // Detect return from Stripe and auto-analyze
+  // Detect return from PayPal and auto-analyze
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const sessionId = params.get('session_id');
-    if (!sessionId) return;
+    const orderId = params.get('token'); // PayPal returns ?token=ORDER_ID
+    if (!orderId) return;
 
     window.history.replaceState({}, '', '/');
 
@@ -40,18 +40,18 @@ export default function Home() {
     sessionStorage.removeItem('chartai_image');
     sessionStorage.removeItem('chartai_media_type');
 
-    runAnalysis(sessionId, b64, mt);
+    runAnalysis(orderId, b64, mt);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function runAnalysis(sessionId, b64, mt) {
+  async function runAnalysis(orderId, b64, mt) {
     setAnalyzing(true);
     setError(null);
     try {
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, image: b64, mediaType: mt }),
+        body: JSON.stringify({ orderId, image: b64, mediaType: mt }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Analysis failed');
