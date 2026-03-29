@@ -1,0 +1,103 @@
+import { NextResponse } from 'next/server';
+import Stripe from 'stripe';
+import { kv } from '@vercel/kv';
+import Anthropic from '@anthropic-ai/sdk';
+
+const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY);
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+export async function POST(request) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 });
+  }
+
+  const { sessionId, image, mediaType } = body;
+
+  if (!sessionId || !image || !mediaType) {
+    return NextResponse.json({ error: 'Missing required fields.' }, { status: 400 });
+  }
+
+  // 1. Verify Stripe payment
+  let session;
+  try {
+    session = await stripe.checkout.sessions.retrieve(sessionId);
+  } catch {
+    return NextResponse.json({ error: 'Invalid payment session.' }, { status: 400 });
+  }
+
+  if (session.payment_status !== 'paid') {
+    return NextResponse.json({ error: 'Payment not completed.' }, { status: 402 });
+  }
+
+  // 2. Atomic check: mark session as used (prevents replay attacks / double-use)
+  const kvKey = `session:${sessionId}`;
+  const wasSet = await kv.set(kvKey, 'used', { ex: 86400, nx: true }); // nx = only if not exists
+  if (wasSet === null) {
+    return NextResponse.json(
+      { error: 'This payment session has already been used.' },
+      { status: 409 }
+    );
+  }
+
+  // 3. Analyze with Claude
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 1024,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mediaType, data: image },
+            },
+            {
+              type: 'text',
+              text: `You are an expert cryptocurrency technical analyst. Carefully examine this crypto chart and provide a detailed prediction.
+
+Analyze for: price trend, momentum, technical patterns (head & shoulders, triangles, flags, wedges, double tops/bottoms, etc.), support/resistance levels, volume, candlestick patterns, moving averages.
+
+Return ONLY a valid JSON object — no markdown, no extra text:
+{
+  "direction": "UP" or "DOWN",
+  "confidence": <integer 0-100>,
+  "trend": "<current trend description>",
+  "patterns": ["<pattern1>", "<pattern2>"],
+  "support": "<support level or N/A>",
+  "resistance": "<resistance level or N/A>",
+  "reasoning": "<2-3 sentence technical analysis>",
+  "timeframe": "<prediction timeframe, e.g. Next 4-24 hours>"
+}`,
+            },
+          ],
+        },
+      ],
+    });
+
+    const text = response.content.find((b) => b.type === 'text')?.text || '';
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) {
+      // Claude failed to return JSON — release the session lock so user can retry
+      await kv.del(kvKey);
+      return NextResponse.json(
+        { error: 'Analysis failed to parse. Please try again (your payment is still valid).' },
+        { status: 500 }
+      );
+    }
+
+    const analysis = JSON.parse(match[0]);
+    return NextResponse.json({ analysis });
+  } catch (err) {
+    // Claude/API error — release the session lock so user can retry
+    await kv.del(kvKey);
+    console.error('Claude error:', err);
+    return NextResponse.json(
+      { error: 'Analysis failed. Please try again (your payment is still valid).' },
+      { status: 500 }
+    );
+  }
+}
