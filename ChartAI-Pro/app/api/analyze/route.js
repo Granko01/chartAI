@@ -40,7 +40,36 @@ export async function POST(request) {
     return NextResponse.json({ error: 'Missing required fields.' }, { status: 400 });
   }
 
-  // 1. Verify / capture payment (skip if free use)
+  // 1. Validate the image is actually a chart
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      const check = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 16,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: mediaType, data: image } },
+              { type: 'text', text: 'Is this image a financial/trading chart (candlestick, line, bar, etc.)? Reply with only YES or NO.' },
+            ],
+          },
+        ],
+      });
+      const answer = check.content.find((b) => b.type === 'text')?.text?.trim().toUpperCase() || '';
+      if (!answer.startsWith('YES')) {
+        return NextResponse.json(
+          { error: 'The uploaded image does not appear to be a chart. Please upload a screenshot of a trading chart.' },
+          { status: 422 }
+        );
+      }
+    } catch (err) {
+      console.error('Chart validation error:', err);
+      // Non-blocking: if validation fails, proceed anyway
+    }
+  }
+
+  // 2. Verify / capture payment (skip if free use)
   if (orderId !== 'free') {
     let captureData;
     try {
@@ -74,7 +103,7 @@ export async function POST(request) {
     }
   }
 
-  // 2. Analyze with Claude (or return mock data if no API key set)
+  // 3. Analyze with Claude (or return mock data if no API key set)
   if (!process.env.ANTHROPIC_API_KEY) {
     return NextResponse.json({
       analysis: {
