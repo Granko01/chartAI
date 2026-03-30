@@ -152,7 +152,7 @@ export default function Home() {
           </div>
           <span style={s.brandSep}>|</span>
           <span style={s.brandSub}>Crypto Chart Analyzer</span>
-          <span style={{ ...s.badge, marginLeft: 'auto' }}>Powered by Claude AI</span>
+          <span style={{ ...s.badge, marginLeft: 'auto' }}>Powered by AI</span>
         </div>
       </header>
 
@@ -298,7 +298,7 @@ export default function Home() {
                 <p style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
                   {returnMsg || 'Analyzing chart…'}
                 </p>
-                <p style={{ fontSize: 13, color: 'var(--muted)' }}>Claude AI is reading your chart</p>
+                <p style={{ fontSize: 13, color: 'var(--muted)' }}>AI is reading your chart</p>
               </div>
             ) : analysis ? (
               <>
