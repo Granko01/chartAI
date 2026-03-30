@@ -401,6 +401,11 @@ export default function Home() {
         <p style={{ fontSize: 12, color: 'var(--muted)', opacity: .45 }}>
           Powered by Claude AI · Not financial advice
         </p>
+        <p style={{ fontSize: 12, color: 'var(--muted)', opacity: .35, marginTop: 6 }}>
+          <a href="/terms" style={{ color: 'inherit', textDecoration: 'underline' }}>Terms of Service</a>
+          {' · '}
+          <a href="/privacy" style={{ color: 'inherit', textDecoration: 'underline' }}>Privacy Policy</a>
+        </p>
       </footer>
     </div>
   );
