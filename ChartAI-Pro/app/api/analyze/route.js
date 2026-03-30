@@ -1,6 +1,46 @@
 import { NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 
+// ── Constants ────────────────────────────────────────────────────
+const ALLOWED_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
+const FREE_LIMIT = 5;
+const RATE_LIMIT = 20;            // requests per IP per hour
+const RATE_WINDOW_MS = 60 * 60 * 1000;
+
+// ── In-memory stores (reset on cold start — good enough for abuse prevention) ──
+const rateMap = new Map(); // ip -> { count, resetAt }
+const freeMap = new Map(); // ip -> usedCount
+
+function getIP(request) {
+  return (
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    request.headers.get('x-real-ip') ||
+    'unknown'
+  );
+}
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const entry = rateMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= RATE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+function freeUsesLeft(ip) {
+  return Math.max(0, FREE_LIMIT - (freeMap.get(ip) || 0));
+}
+
+function incrementFreeUses(ip) {
+  freeMap.set(ip, (freeMap.get(ip) || 0) + 1);
+}
+
+// ── PayPal helpers ───────────────────────────────────────────────
 function paypalBase() {
   return process.env.PAYPAL_ENV === 'live'
     ? 'https://api-m.paypal.com'
@@ -24,7 +64,18 @@ async function getAccessToken() {
   return data.access_token;
 }
 
+// ── Route handler ────────────────────────────────────────────────
 export async function POST(request) {
+  const ip = getIP(request);
+
+  // 1. Rate limit
+  if (!checkRateLimit(ip)) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please try again later.' },
+      { status: 429 }
+    );
+  }
+
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   let body;
@@ -40,7 +91,32 @@ export async function POST(request) {
     return NextResponse.json({ error: 'Missing required fields.' }, { status: 400 });
   }
 
-  // 1. Validate the image is actually a chart
+  // 2. Validate mediaType
+  if (!ALLOWED_MEDIA_TYPES.has(mediaType)) {
+    return NextResponse.json(
+      { error: 'Invalid image type. Only JPEG, PNG, GIF, and WebP are allowed.' },
+      { status: 400 }
+    );
+  }
+
+  // 3. Validate image size (base64 → ~75% of actual bytes)
+  const estimatedBytes = Math.ceil((image.length * 3) / 4);
+  if (estimatedBytes > MAX_IMAGE_BYTES) {
+    return NextResponse.json(
+      { error: 'Image too large. Maximum size is 20MB.' },
+      { status: 400 }
+    );
+  }
+
+  // 4. Server-side free tier check
+  if (orderId === 'free' && freeUsesLeft(ip) <= 0) {
+    return NextResponse.json(
+      { error: 'Free analyses exhausted. Please pay to continue.' },
+      { status: 403 }
+    );
+  }
+
+  // 5. Validate the image is actually a chart
   if (process.env.ANTHROPIC_API_KEY) {
     try {
       const check = await anthropic.messages.create({
@@ -69,9 +145,9 @@ export async function POST(request) {
     }
   }
 
-  // 2. Verify / capture payment (skip if free use)
+  // 6. Verify / capture payment (skip if free use)
+  let captureData;
   if (orderId !== 'free') {
-    let captureData;
     try {
       const accessToken = await getAccessToken();
       const res = await fetch(`${paypalBase()}/v2/checkout/orders/${orderId}/capture`, {
@@ -103,8 +179,9 @@ export async function POST(request) {
     }
   }
 
-  // 3. Analyze with Claude (or return mock data if no API key set)
+  // 7. Analyze with Claude (or return mock data if no API key set)
   if (!process.env.ANTHROPIC_API_KEY) {
+    if (orderId === 'free') incrementFreeUses(ip);
     return NextResponse.json({
       analysis: {
         direction: 'UP',
@@ -158,14 +235,14 @@ Return ONLY a valid JSON object — no markdown, no extra text:
     const match = text.match(/\{[\s\S]*\}/);
 
     if (!match) {
-      // Payment was captured but Claude failed — log the capture ID for manual refund
-      console.error('Claude parse failed. PayPal capture ID:', captureData.purchase_units?.[0]?.payments?.captures?.[0]?.id);
+      console.error('Claude parse failed. PayPal capture ID:', captureData?.purchase_units?.[0]?.payments?.captures?.[0]?.id);
       return NextResponse.json(
-        { error: 'Analysis failed after payment. Contact support with this ID: ' + (captureData.id || orderId) },
+        { error: 'Analysis failed after payment. Contact support with this ID: ' + (captureData?.id || orderId) },
         { status: 500 }
       );
     }
 
+    if (orderId === 'free') incrementFreeUses(ip);
     return NextResponse.json({ analysis: JSON.parse(match[0]) });
   } catch (err) {
     console.error('Claude error. PayPal order:', orderId, err);
