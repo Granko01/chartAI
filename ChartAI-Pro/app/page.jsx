@@ -38,7 +38,7 @@ export default function Home() {
   // Detect return from PayPal and auto-analyze
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const orderId = params.get('token'); // PayPal returns ?token=ORDER_ID
+    const orderId = params.get('NP_id'); // NOWPayments returns ?NP_id=PAYMENT_ID
     if (!orderId) return;
 
     window.history.replaceState({}, '', '/');

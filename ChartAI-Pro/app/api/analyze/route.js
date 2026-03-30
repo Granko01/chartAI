@@ -9,8 +9,9 @@ const RATE_LIMIT = 20;            // requests per IP per hour
 const RATE_WINDOW_MS = 60 * 60 * 1000;
 
 // ── In-memory stores (reset on cold start — good enough for abuse prevention) ──
-const rateMap = new Map(); // ip -> { count, resetAt }
-const freeMap = new Map(); // ip -> usedCount
+const rateMap = new Map();      // ip -> { count, resetAt }
+const freeMap = new Map();      // ip -> usedCount
+const usedPayments = new Set(); // NOWPayments payment IDs already used
 
 function getIP(request) {
   return (
@@ -40,28 +41,14 @@ function incrementFreeUses(ip) {
   freeMap.set(ip, (freeMap.get(ip) || 0) + 1);
 }
 
-// ── PayPal helpers ───────────────────────────────────────────────
-function paypalBase() {
-  return process.env.PAYPAL_ENV === 'live'
-    ? 'https://api-m.paypal.com'
-    : 'https://api-m.sandbox.paypal.com';
-}
+// ── NOWPayments helpers ──────────────────────────────────────────
+const NP_VALID_STATUSES = new Set(['confirming', 'confirmed', 'sending', 'finished']);
 
-async function getAccessToken() {
-  const credentials = Buffer.from(
-    `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
-  ).toString('base64');
-
-  const res = await fetch(`${paypalBase()}/v1/oauth2/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
+async function verifyNowPayment(paymentId) {
+  const res = await fetch(`https://api.nowpayments.io/v1/payment/${paymentId}`, {
+    headers: { 'x-api-key': process.env.NOWPAYMENTS_API_KEY },
   });
-  const data = await res.json();
-  return data.access_token;
+  return res.json();
 }
 
 // ── Route handler ────────────────────────────────────────────────
@@ -145,35 +132,27 @@ export async function POST(request) {
     }
   }
 
-  // 6. Verify / capture payment (skip if free use)
-  let captureData;
+  // 6. Verify payment (skip if free use)
   if (orderId !== 'free') {
-    try {
-      const accessToken = await getAccessToken();
-      const res = await fetch(`${paypalBase()}/v2/checkout/orders/${orderId}/capture`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      });
-      captureData = await res.json();
-    } catch (err) {
-      console.error('PayPal capture error:', err);
-      return NextResponse.json({ error: 'Payment verification failed. Please try again.' }, { status: 500 });
-    }
-
-    if (captureData.details?.[0]?.issue === 'ORDER_ALREADY_CAPTURED') {
+    if (usedPayments.has(orderId)) {
       return NextResponse.json(
         { error: 'This payment has already been used for an analysis.' },
         { status: 409 }
       );
     }
 
-    if (captureData.status !== 'COMPLETED') {
-      console.error('PayPal capture status:', captureData);
+    let paymentData;
+    try {
+      paymentData = await verifyNowPayment(orderId);
+    } catch (err) {
+      console.error('NOWPayments verification error:', err);
+      return NextResponse.json({ error: 'Payment verification failed. Please try again.' }, { status: 500 });
+    }
+
+    if (!NP_VALID_STATUSES.has(paymentData.payment_status)) {
+      console.error('NOWPayments payment status:', paymentData);
       return NextResponse.json(
-        { error: 'Payment not confirmed. Please try again.' },
+        { error: 'Payment not confirmed yet. Please wait a moment and try again.' },
         { status: 402 }
       );
     }
@@ -235,14 +214,18 @@ Return ONLY a valid JSON object — no markdown, no extra text:
     const match = text.match(/\{[\s\S]*\}/);
 
     if (!match) {
-      console.error('Claude parse failed. PayPal capture ID:', captureData?.purchase_units?.[0]?.payments?.captures?.[0]?.id);
+      console.error('Claude parse failed for order:', orderId);
       return NextResponse.json(
-        { error: 'Analysis failed after payment. Contact support with this ID: ' + (captureData?.id || orderId) },
+        { error: 'Analysis failed. Contact support with this ID: ' + orderId },
         { status: 500 }
       );
     }
 
-    if (orderId === 'free') incrementFreeUses(ip);
+    if (orderId === 'free') {
+      incrementFreeUses(ip);
+    } else {
+      usedPayments.add(orderId);
+    }
     return NextResponse.json({ analysis: JSON.parse(match[0]) });
   } catch (err) {
     console.error('Claude error. PayPal order:', orderId, err);
