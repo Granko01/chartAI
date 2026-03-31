@@ -4,7 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 // ── Constants ────────────────────────────────────────────────────
 const ALLOWED_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
-const FREE_LIMIT = 5;
+const FREE_LIMIT = 2;
 const RATE_LIMIT = 20;            // requests per IP per hour
 const RATE_WINDOW_MS = 60 * 60 * 1000;
 
@@ -42,10 +42,14 @@ function incrementFreeUses(ip) {
 }
 
 // ── NOWPayments helpers ──────────────────────────────────────────
+const NP_BASE = process.env.NOWPAYMENTS_SANDBOX === 'true'
+  ? 'https://sandbox.api.nowpayments.io'
+  : 'https://api.nowpayments.io';
+
 const NP_VALID_STATUSES = new Set(['confirming', 'confirmed', 'sending', 'finished']);
 
 async function verifyNowPayment(paymentId) {
-  const res = await fetch(`https://api.nowpayments.io/v1/payment/${paymentId}`, {
+  const res = await fetch(`${NP_BASE}/v1/payment/${paymentId}`, {
     headers: { 'x-api-key': process.env.NOWPAYMENTS_API_KEY },
   });
   return res.json();

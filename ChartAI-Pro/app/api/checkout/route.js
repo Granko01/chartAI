@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
 
+const NP_BASE = process.env.NOWPAYMENTS_SANDBOX === 'true'
+  ? 'https://sandbox.api.nowpayments.io'
+  : 'https://api.nowpayments.io';
+
 export async function POST() {
   if (!process.env.NOWPAYMENTS_API_KEY) {
     return NextResponse.json({ error: 'Payment not configured.' }, { status: 500 });
@@ -12,7 +16,7 @@ export async function POST() {
     const amount = (parseInt(process.env.PRICE_CENTS || '99') / 100).toFixed(2);
     const appUrl = process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, '');
 
-    const res = await fetch('https://api.nowpayments.io/v1/invoice', {
+    const res = await fetch(`${NP_BASE}/v1/invoice`, {
       method: 'POST',
       headers: {
         'x-api-key': process.env.NOWPAYMENTS_API_KEY,

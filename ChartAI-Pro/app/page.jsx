@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const PRICE = process.env.NEXT_PUBLIC_PRICE_DISPLAY || '$0.99';
-const FREE_LIMIT = 5;
+const FREE_LIMIT = 2;
 const LS_KEY = 'chartai_free_uses';
 
 function getFreeUsesLeft() {
