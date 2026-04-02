@@ -16,36 +16,53 @@ export async function POST() {
     const amount = (parseInt(process.env.PRICE_CENTS || '99') / 100).toFixed(2);
     const appUrl = process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, '');
 
-    const res = await fetch(`${NP_BASE}/v1/invoice`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': process.env.NOWPAYMENTS_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        price_amount: parseFloat(amount),
-        price_currency: 'usd',
-        order_description: 'ChartAI — Crypto Chart Analysis',
-        success_url: `${appUrl}/`,
-        cancel_url: `${appUrl}/`,
-      }),
-    });
+    let res;
+    try {
+      res = await fetch(`${NP_BASE}/v1/invoice`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': process.env.NOWPAYMENTS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          price_amount: parseFloat(amount),
+          price_currency: 'usd',
+          order_description: 'ChartAI — Crypto Chart Analysis',
+          success_url: `${appUrl}/`,
+          cancel_url: `${appUrl}/`,
+        }),
+      });
+    } catch (networkErr) {
+      console.error('NOWPayments network error:', networkErr);
+      return NextResponse.json(
+        { error: 'Payment provider is unreachable. Please try again in a moment.' },
+        { status: 502 }
+      );
+    }
 
-    const invoice = await res.json();
+    let invoice;
+    try {
+      invoice = await res.json();
+    } catch {
+      console.error('NOWPayments returned non-JSON, status:', res.status);
+      return NextResponse.json(
+        { error: 'Unexpected response from payment provider. Please try again.' },
+        { status: 502 }
+      );
+    }
 
     if (!invoice.invoice_url) {
       console.error('NOWPayments invoice response:', JSON.stringify(invoice));
-      return NextResponse.json(
-        { error: 'Could not create payment. Please try again.' },
-        { status: 500 }
-      );
+      // Surface the API error message if available
+      const apiMsg = invoice.message || invoice.error || 'Could not create payment. Please try again.';
+      return NextResponse.json({ error: apiMsg }, { status: 500 });
     }
 
     return NextResponse.json({ url: invoice.invoice_url });
   } catch (err) {
     console.error('NOWPayments checkout error:', err);
     return NextResponse.json(
-      { error: err.message || 'Could not start checkout. Please try again.' },
+      { error: 'Could not start checkout. Please try again.' },
       { status: 500 }
     );
   }

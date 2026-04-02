@@ -2,10 +2,17 @@ import { NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { Redis } from '@upstash/redis';
 
-const kv = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+// Redis is optional — if not configured, rate limiting and IP-based free-tier
+// tracking are skipped; the cookie gate still applies.
+const REDIS_ENABLED =
+  !!process.env.UPSTASH_REDIS_REST_URL && !!process.env.UPSTASH_REDIS_REST_TOKEN;
+
+const kv = REDIS_ENABLED
+  ? new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    })
+  : null;
 
 // ── Constants ────────────────────────────────────────────────────
 const ALLOWED_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -13,6 +20,7 @@ const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
 const FREE_LIMIT = 2;
 const RATE_LIMIT = 20;           // requests per IP per hour
 const RATE_WINDOW = 3600;        // seconds
+const COOKIE_NAME = 'chartai_fu'; // HttpOnly free-use counter — not forgeable by JS
 
 function getIP(request) {
   return (
@@ -22,20 +30,57 @@ function getIP(request) {
   );
 }
 
+// Returns false (block) only when Redis is available AND limit is exceeded
 async function checkRateLimit(ip) {
-  const key = `rate:${ip}`;
-  const count = await kv.incr(key);
-  if (count === 1) await kv.expire(key, RATE_WINDOW);
-  return count <= RATE_LIMIT;
+  if (!kv) return true; // no Redis → skip rate limiting
+  try {
+    const key = `rate:${ip}`;
+    const count = await kv.incr(key);
+    if (count === 1) await kv.expire(key, RATE_WINDOW);
+    return count <= RATE_LIMIT;
+  } catch (err) {
+    console.error('Rate limit Redis error:', err);
+    return true; // Redis error → let request through
+  }
 }
 
+// Returns how many free uses remain according to Redis (IP-based)
 async function freeUsesLeft(ip) {
-  const used = (await kv.get(`free:${ip}`)) ?? 0;
-  return Math.max(0, FREE_LIMIT - Number(used));
+  if (!kv) return FREE_LIMIT; // no Redis → rely on cookie gate only
+  try {
+    const used = (await kv.get(`free:${ip}`)) ?? 0;
+    return Math.max(0, FREE_LIMIT - Number(used));
+  } catch (err) {
+    console.error('Free-tier Redis error:', err);
+    return FREE_LIMIT; // Redis error → rely on cookie gate only
+  }
 }
 
 async function incrementFreeUses(ip) {
-  await kv.incr(`free:${ip}`);
+  if (!kv) return;
+  try {
+    await kv.incr(`free:${ip}`);
+  } catch (err) {
+    console.error('incrementFreeUses Redis error:', err);
+  }
+}
+
+// How many free uses the browser cookie says have been consumed
+function cookieFreeUsed(request) {
+  const val = request.cookies.get(COOKIE_NAME)?.value;
+  const n = parseInt(val || '0', 10);
+  return isNaN(n) ? 0 : Math.min(n, FREE_LIMIT);
+}
+
+// Attach updated free-use cookie to any NextResponse
+function setFreeUseCookie(response, newCount) {
+  response.cookies.set(COOKIE_NAME, String(newCount), {
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 60 * 60 * 24 * 365, // 1 year
+  });
+  return response;
 }
 
 // ── NOWPayments helpers ──────────────────────────────────────────
@@ -47,13 +92,39 @@ const NP_VALID_STATUSES = new Set(['confirming', 'confirmed', 'sending', 'finish
 
 async function verifyNowPayment(paymentId) {
   // Check IPN-cached status first (set by /api/ipn webhook)
-  const cached = await kv.get(`payment:${paymentId}:status`);
-  if (cached) return { payment_status: cached };
+  if (kv) {
+    try {
+      const cached = await kv.get(`payment:${paymentId}:status`);
+      if (cached) return { payment_status: cached };
+    } catch (err) {
+      console.error('IPN cache Redis error:', err);
+      // fall through to direct API check
+    }
+  }
 
   const res = await fetch(`${NP_BASE}/v1/payment/${paymentId}`, {
     headers: { 'x-api-key': process.env.NOWPAYMENTS_API_KEY },
   });
   return res.json();
+}
+
+async function markPaymentUsed(orderId) {
+  if (!kv) return;
+  try {
+    await kv.set(`payment:${orderId}:used`, 1, { ex: 86400 * 30 });
+  } catch (err) {
+    console.error('markPaymentUsed Redis error:', err);
+  }
+}
+
+async function isPaymentAlreadyUsed(orderId) {
+  if (!kv) return false; // no Redis → can't check, allow through
+  try {
+    return !!(await kv.get(`payment:${orderId}:used`));
+  } catch (err) {
+    console.error('isPaymentAlreadyUsed Redis error:', err);
+    return false;
+  }
 }
 
 // ── Route handler ────────────────────────────────────────────────
@@ -100,10 +171,15 @@ export async function POST(request) {
     );
   }
 
-  // 4. Server-side free tier check
+  // 4. Server-side free tier check.
+  //    Cookie gate  → blocks same-browser localStorage-reset abuse.
+  //    IP gate      → blocks browser-switching abuse (when Redis is available).
+  //    Both must pass.
   if (orderId === 'free') {
-    const left = await freeUsesLeft(ip);
-    if (left <= 0) {
+    const cookieUsed = cookieFreeUsed(request);
+    const ipLeft = await freeUsesLeft(ip);
+
+    if (cookieUsed >= FREE_LIMIT || ipLeft <= 0) {
       return NextResponse.json(
         { error: 'Free analyses exhausted. Please pay to continue.' },
         { status: 403 }
@@ -142,8 +218,7 @@ export async function POST(request) {
 
   // 6. Verify payment (skip if free use)
   if (orderId !== 'free') {
-    const alreadyUsed = await kv.get(`payment:${orderId}:used`);
-    if (alreadyUsed) {
+    if (await isPaymentAlreadyUsed(orderId)) {
       return NextResponse.json(
         { error: 'This payment has already been used for an analysis.' },
         { status: 409 }
@@ -167,20 +242,30 @@ export async function POST(request) {
     }
   }
 
+  // Helper: build final response and increment free-use counters if needed
+  async function buildResponse(analysisObj) {
+    if (orderId === 'free') {
+      await incrementFreeUses(ip);
+      const newCookieCount = cookieFreeUsed(request) + 1;
+      const res = NextResponse.json({ analysis: analysisObj });
+      return setFreeUseCookie(res, newCookieCount);
+    } else {
+      await markPaymentUsed(orderId);
+      return NextResponse.json({ analysis: analysisObj });
+    }
+  }
+
   // 7. Analyze with Claude (or return mock data if no API key set)
   if (!process.env.ANTHROPIC_API_KEY) {
-    if (orderId === 'free') await incrementFreeUses(ip);
-    return NextResponse.json({
-      analysis: {
-        direction: 'UP',
-        confidence: 72,
-        trend: 'Bullish uptrend with increasing momentum',
-        patterns: ['Ascending Triangle', 'Golden Cross'],
-        support: '$42,000',
-        resistance: '$48,500',
-        reasoning: 'TEST MODE — Anthropic API key not set. The chart shows a clear ascending triangle pattern with higher lows forming over the past week. Volume is increasing on up-moves suggesting accumulation. A breakout above resistance could trigger a significant rally.',
-        timeframe: 'Next 24-48 hours',
-      },
+    return buildResponse({
+      direction: 'UP',
+      confidence: 72,
+      trend: 'Bullish uptrend with increasing momentum',
+      patterns: ['Ascending Triangle', 'Golden Cross'],
+      support: '$42,000',
+      resistance: '$48,500',
+      reasoning: 'TEST MODE — Anthropic API key not set. The chart shows a clear ascending triangle pattern with higher lows forming over the past week. Volume is increasing on up-moves suggesting accumulation. A breakout above resistance could trigger a significant rally.',
+      timeframe: 'Next 24-48 hours',
     });
   }
 
@@ -230,12 +315,7 @@ Return ONLY a valid JSON object — no markdown, no extra text:
       );
     }
 
-    if (orderId === 'free') {
-      await incrementFreeUses(ip);
-    } else {
-      await kv.set(`payment:${orderId}:used`, 1, { ex: 86400 * 30 }); // 30-day TTL
-    }
-    return NextResponse.json({ analysis: JSON.parse(match[0]) });
+    return buildResponse(JSON.parse(match[0]));
   } catch (err) {
     console.error('Claude error. Order:', orderId, err);
     return NextResponse.json(
