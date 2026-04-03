@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 
+// v2
 const PP_BASE = process.env.PAYPAL_MODE === 'live'
   ? 'https://api-m.paypal.com'
   : 'https://api-m.sandbox.paypal.com';
