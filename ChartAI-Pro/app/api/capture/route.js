@@ -50,7 +50,7 @@ export async function POST(request) {
     if (!res.ok || data.status !== 'COMPLETED') {
       console.error('PayPal capture failed:', JSON.stringify(data));
       return NextResponse.json(
-        { error: 'Payment capture failed. Please contact support.' },
+        { error: JSON.stringify(data) },
         { status: 402 }
       );
     }
