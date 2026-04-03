@@ -38,7 +38,7 @@ export default function Home() {
   // Detect return from PayPal and auto-analyze
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const orderId = params.get('NP_id'); // NOWPayments returns ?NP_id=PAYMENT_ID
+    const orderId = params.get('token'); // PayPal returns ?token=ORDER_ID&PayerID=...
     if (!orderId) return;
 
     window.history.replaceState({}, '', '/');
@@ -54,11 +54,30 @@ export default function Home() {
     setImageB64(b64);
     setMediaType(mt);
     setImageUrl('data:' + mt + ';base64,' + b64);
-    setReturnMsg('Payment confirmed! Running analysis…');
+    setReturnMsg('Confirming payment…');
 
     sessionStorage.removeItem('chartai_image');
     sessionStorage.removeItem('chartai_media_type');
 
+    try {
+      const capRes = await fetch('/api/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId }),
+      });
+      const capData = await capRes.json();
+      if (!capRes.ok) {
+        setError(capData.error || 'Payment capture failed. Please contact support.');
+        setReturnMsg(null);
+        return;
+      }
+    } catch {
+      setError('Network error during payment capture. Please contact support.');
+      setReturnMsg(null);
+      return;
+    }
+
+    setReturnMsg('Payment confirmed! Running analysis…');
     runAnalysis(orderId, b64, mt);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

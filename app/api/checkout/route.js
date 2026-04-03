@@ -1,11 +1,28 @@
 import { NextResponse } from 'next/server';
 
-const NP_BASE = process.env.NOWPAYMENTS_SANDBOX === 'true'
-  ? 'https://sandbox.api.nowpayments.io'
-  : 'https://api.nowpayments.io';
+const PP_BASE = process.env.PAYPAL_MODE === 'live'
+  ? 'https://api-m.paypal.com'
+  : 'https://api-m.sandbox.paypal.com';
+
+async function getPayPalToken() {
+  const creds = Buffer.from(
+    `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
+  ).toString('base64');
+  const res = await fetch(`${PP_BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${creds}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+  if (!res.ok) throw new Error(`PayPal auth failed: ${await res.text()}`);
+  const { access_token } = await res.json();
+  return access_token;
+}
 
 export async function POST() {
-  if (!process.env.NOWPAYMENTS_API_KEY) {
+  if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
     return NextResponse.json({ error: 'Payment not configured.' }, { status: 500 });
   }
   if (!process.env.NEXT_PUBLIC_APP_URL) {
@@ -13,54 +30,51 @@ export async function POST() {
   }
 
   try {
-    const amount = (parseInt(process.env.PRICE_CENTS || '99') / 100).toFixed(2);
+    const token = await getPayPalToken();
     const appUrl = process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, '');
+    const amount = (parseInt(process.env.PRICE_CENTS || '99') / 100).toFixed(2);
 
-    let res;
-    try {
-      res = await fetch(`${NP_BASE}/v1/invoice`, {
-        method: 'POST',
-        headers: {
-          'x-api-key': process.env.NOWPAYMENTS_API_KEY,
-          'Content-Type': 'application/json',
+    const res = await fetch(`${PP_BASE}/v2/checkout/orders`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [{
+          amount: { currency_code: 'USD', value: amount },
+          description: 'ChartAI — Crypto Chart Analysis',
+        }],
+        application_context: {
+          return_url: `${appUrl}/?`,
+          cancel_url:  `${appUrl}/`,
+          brand_name:  'ChartAI Pro',
+          user_action: 'PAY_NOW',
         },
-        body: JSON.stringify({
-          price_amount: parseFloat(amount),
-          price_currency: 'usd',
-          order_description: 'ChartAI — Crypto Chart Analysis',
-          success_url: `${appUrl}/`,
-          cancel_url: `${appUrl}/`,
-        }),
-      });
-    } catch (networkErr) {
-      console.error('NOWPayments network error:', networkErr);
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error('PayPal create order error:', err);
       return NextResponse.json(
-        { error: 'Payment provider is unreachable. Please try again in a moment.' },
+        { error: 'Could not start checkout. Please try again.' },
         { status: 502 }
       );
     }
 
-    let invoice;
-    try {
-      invoice = await res.json();
-    } catch {
-      console.error('NOWPayments returned non-JSON, status:', res.status);
-      return NextResponse.json(
-        { error: 'Unexpected response from payment provider. Please try again.' },
-        { status: 502 }
-      );
+    const order = await res.json();
+    const approveLink = order.links?.find((l) => l.rel === 'approve')?.href;
+
+    if (!approveLink) {
+      console.error('PayPal order missing approve link:', JSON.stringify(order));
+      return NextResponse.json({ error: 'Could not create payment.' }, { status: 500 });
     }
 
-    if (!invoice.invoice_url) {
-      console.error('NOWPayments invoice response:', JSON.stringify(invoice));
-      // Surface the API error message if available
-      const apiMsg = invoice.message || invoice.error || 'Could not create payment. Please try again.';
-      return NextResponse.json({ error: apiMsg }, { status: 500 });
-    }
-
-    return NextResponse.json({ url: invoice.invoice_url });
+    return NextResponse.json({ url: approveLink });
   } catch (err) {
-    console.error('NOWPayments checkout error:', err);
+    console.error('PayPal checkout error:', err);
     return NextResponse.json(
       { error: 'Could not start checkout. Please try again.' },
       { status: 500 }

@@ -4,14 +4,16 @@ import { Redis } from '@upstash/redis';
 
 // Redis is optional — if not configured, rate limiting and IP-based free-tier
 // tracking are skipped; the cookie gate still applies.
-const REDIS_ENABLED =
-  !!process.env.UPSTASH_REDIS_REST_URL && !!process.env.UPSTASH_REDIS_REST_TOKEN;
+// Vercel's Upstash KV integration injects KV_REST_API_URL / KV_REST_API_TOKEN;
+// fall back to the legacy UPSTASH_REDIS_REST_* names for manual setups.
+const REDIS_URL =
+  process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN =
+  process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+const REDIS_ENABLED = !!REDIS_URL && !!REDIS_TOKEN;
 
 const kv = REDIS_ENABLED
-  ? new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
-    })
+  ? new Redis({ url: REDIS_URL, token: REDIS_TOKEN })
   : null;
 
 // ── Constants ────────────────────────────────────────────────────
@@ -83,29 +85,29 @@ function setFreeUseCookie(response, newCount) {
   return response;
 }
 
-// ── NOWPayments helpers ──────────────────────────────────────────
-const NP_BASE = process.env.NOWPAYMENTS_SANDBOX === 'true'
-  ? 'https://sandbox.api.nowpayments.io'
-  : 'https://api.nowpayments.io';
+// ── PayPal helpers ───────────────────────────────────────────────
+const PP_BASE = process.env.PAYPAL_MODE === 'live'
+  ? 'https://api-m.paypal.com'
+  : 'https://api-m.sandbox.paypal.com';
 
-const NP_VALID_STATUSES = new Set(['confirming', 'confirmed', 'sending', 'finished']);
-
-async function verifyNowPayment(paymentId) {
-  // Check IPN-cached status first (set by /api/ipn webhook)
-  if (kv) {
-    try {
-      const cached = await kv.get(`payment:${paymentId}:status`);
-      if (cached) return { payment_status: cached };
-    } catch (err) {
-      console.error('IPN cache Redis error:', err);
-      // fall through to direct API check
-    }
-  }
-
-  const res = await fetch(`${NP_BASE}/v1/payment/${paymentId}`, {
-    headers: { 'x-api-key': process.env.NOWPAYMENTS_API_KEY },
+async function verifyPayPalOrder(orderId) {
+  const creds = Buffer.from(
+    `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
+  ).toString('base64');
+  const tokenRes = await fetch(`${PP_BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${creds}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
   });
-  return res.json();
+  const { access_token } = await tokenRes.json();
+
+  const orderRes = await fetch(`${PP_BASE}/v2/checkout/orders/${orderId}`, {
+    headers: { Authorization: `Bearer ${access_token}` },
+  });
+  return orderRes.json();
 }
 
 async function markPaymentUsed(orderId) {
@@ -225,18 +227,18 @@ export async function POST(request) {
       );
     }
 
-    let paymentData;
+    let orderData;
     try {
-      paymentData = await verifyNowPayment(orderId);
+      orderData = await verifyPayPalOrder(orderId);
     } catch (err) {
-      console.error('NOWPayments verification error:', err);
+      console.error('PayPal verification error:', err);
       return NextResponse.json({ error: 'Payment verification failed. Please try again.' }, { status: 500 });
     }
 
-    if (!NP_VALID_STATUSES.has(paymentData.payment_status)) {
-      console.error('NOWPayments payment status:', paymentData);
+    if (orderData.status !== 'COMPLETED') {
+      console.error('PayPal order not COMPLETED:', orderData.status, orderId);
       return NextResponse.json(
-        { error: 'Payment not confirmed yet. Please wait a moment and try again.' },
+        { error: 'Payment not confirmed. Please try again or contact support.' },
         { status: 402 }
       );
     }
