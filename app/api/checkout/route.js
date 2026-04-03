@@ -23,8 +23,11 @@ async function getPayPalToken() {
 }
 
 export async function POST() {
-  if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
-    return NextResponse.json({ error: 'Payment not configured.' }, { status: 500 });
+  if (!process.env.PAYPAL_CLIENT_ID) {
+    return NextResponse.json({ error: 'Missing PAYPAL_CLIENT_ID' }, { status: 500 });
+  }
+  if (!process.env.PAYPAL_CLIENT_SECRET) {
+    return NextResponse.json({ error: 'Missing PAYPAL_CLIENT_SECRET' }, { status: 500 });
   }
   if (!process.env.NEXT_PUBLIC_APP_URL) {
     return NextResponse.json({ error: 'App URL not configured.' }, { status: 500 });
