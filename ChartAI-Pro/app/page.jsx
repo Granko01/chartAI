@@ -59,26 +59,30 @@ export default function Home() {
     sessionStorage.removeItem('chartai_image');
     sessionStorage.removeItem('chartai_media_type');
 
-    try {
-      const capRes = await fetch('/api/capture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId }),
-      });
-      const capData = await capRes.json();
-      if (!capRes.ok) {
-        setError(capData.error || 'Payment capture failed. Please contact support.');
+    async function captureAndAnalyze() {
+      try {
+        const capRes = await fetch('/api/capture', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId }),
+        });
+        const capData = await capRes.json();
+        if (!capRes.ok) {
+          setError(capData.error || 'Payment capture failed. Please contact support.');
+          setReturnMsg(null);
+          return;
+        }
+      } catch {
+        setError('Network error during payment capture. Please contact support.');
         setReturnMsg(null);
         return;
       }
-    } catch {
-      setError('Network error during payment capture. Please contact support.');
-      setReturnMsg(null);
-      return;
+
+      setReturnMsg('Payment confirmed! Running analysis…');
+      runAnalysis(orderId, b64, mt);
     }
 
-    setReturnMsg('Payment confirmed! Running analysis…');
-    runAnalysis(orderId, b64, mt);
+    captureAndAnalyze();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
