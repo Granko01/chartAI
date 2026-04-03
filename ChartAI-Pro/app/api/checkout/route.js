@@ -62,10 +62,7 @@ export async function POST() {
     if (!res.ok) {
       const err = await res.text();
       console.error('PayPal create order error:', err);
-      return NextResponse.json(
-        { error: 'Could not start checkout. Please try again.' },
-        { status: 502 }
-      );
+      return NextResponse.json({ error: err }, { status: 502 });
     }
 
     const order = await res.json();
@@ -79,9 +76,6 @@ export async function POST() {
     return NextResponse.json({ url: approveLink });
   } catch (err) {
     console.error('PayPal checkout error:', err);
-    return NextResponse.json(
-      { error: 'Could not start checkout. Please try again.' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
