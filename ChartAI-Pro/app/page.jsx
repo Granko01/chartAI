@@ -38,7 +38,7 @@ export default function Home() {
   // Detect return from PayPal and auto-analyze
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const orderId = params.get('NP_id'); // NOWPayments returns ?NP_id=PAYMENT_ID
+    const orderId = params.get('token'); // PayPal returns ?token=ORDER_ID&PayerID=...
     if (!orderId) return;
 
     window.history.replaceState({}, '', '/');
@@ -54,11 +54,30 @@ export default function Home() {
     setImageB64(b64);
     setMediaType(mt);
     setImageUrl('data:' + mt + ';base64,' + b64);
-    setReturnMsg('Payment confirmed! Running analysis…');
+    setReturnMsg('Confirming payment…');
 
     sessionStorage.removeItem('chartai_image');
     sessionStorage.removeItem('chartai_media_type');
 
+    try {
+      const capRes = await fetch('/api/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId }),
+      });
+      const capData = await capRes.json();
+      if (!capRes.ok) {
+        setError(capData.error || 'Payment capture failed. Please contact support.');
+        setReturnMsg(null);
+        return;
+      }
+    } catch {
+      setError('Network error during payment capture. Please contact support.');
+      setReturnMsg(null);
+      return;
+    }
+
+    setReturnMsg('Payment confirmed! Running analysis…');
     runAnalysis(orderId, b64, mt);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -66,22 +85,39 @@ export default function Home() {
   async function runAnalysis(orderId, b64, mt) {
     setAnalyzing(true);
     setError(null);
-    try {
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, image: b64, mediaType: mt }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Analysis failed');
-      setAnalysis(data.analysis);
-      setReturnMsg(null);
 
-      // Deduct free use only on success
-      if (orderId === 'free') {
-        incrementFreeUses();
-        setFreeLeft(getFreeUsesLeft());
+    // For paid orders, retry up to 5 times if payment isn't confirmed yet
+    const MAX_RETRIES = orderId !== 'free' ? 5 : 0;
+
+    try {
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        if (attempt > 0) {
+          setReturnMsg(`Confirming payment… (${attempt}/${MAX_RETRIES})`);
+          await new Promise((r) => setTimeout(r, 4000));
+        }
+
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId, image: b64, mediaType: mt }),
+        });
+        const data = await res.json();
+
+        // Payment not confirmed yet — retry
+        if (res.status === 402 && attempt < MAX_RETRIES) continue;
+
+        if (!res.ok) throw new Error(data.error || 'Analysis failed');
+
+        setAnalysis(data.analysis);
+        setReturnMsg(null);
+        if (orderId === 'free') {
+          incrementFreeUses();
+          setFreeLeft(getFreeUsesLeft());
+        }
+        return;
       }
+      // All retries exhausted
+      throw new Error('Payment not confirmed after several attempts. Please contact support@chartai.pro with your payment ID.');
     } catch (err) {
       setError(err.message);
       setReturnMsg(null);
