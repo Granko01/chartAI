@@ -163,6 +163,14 @@ export default function Home() {
     setPaying(true);
     setError(null);
     try {
+      const vRes = await fetch('/api/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageB64, mediaType }),
+      });
+      const vData = await vRes.json();
+      if (!vRes.ok) throw new Error(vData.error || 'Image validation failed');
+
       sessionStorage.setItem('chartai_image', imageB64);
       sessionStorage.setItem('chartai_media_type', mediaType);
 
